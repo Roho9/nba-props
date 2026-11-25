@@ -33,7 +33,9 @@ Python 3.15 (the Homebrew default) is too new for the scientific wheels, so the 
 |---|---|---|
 | `TIMEZONE` | America/New_York | Determines "today" |
 | `ESPN_ENABLED` | true | ESPN public JSON (undocumented; see Data sources) |
-| `ODDS_API_KEY` | empty | The Odds API key for FanDuel/BetMGM/Caesars plus steals/blocks/turnovers markets |
+| `ODDS_API_KEY` | empty | The Odds API key (free tier works) for FanDuel/BetMGM/Caesars plus steals/blocks/turnovers markets |
+| `ODDS_API_PULLS_PER_DAY` / `ODDS_API_LEAD_HOURS` | 1 / 3 | Free-tier schedule: one multi-book pull per slate, 3 h before the first tip-off |
+| `ODDS_API_RESERVE_CREDITS` | 25 | Credits never spent; the daily allowance is (remaining - reserve) / days left in the month |
 | `ANTHROPIC_API_KEY` | empty | Optional LLM rewording of the research note; it cannot add numbers |
 | `AUTO_REFRESH_MIN` | 30 | Background refresh interval (0 disables) |
 | `ODDS_STALE_AFTER_MIN` / `INJURIES_STALE_AFTER_MIN` | 45 / 120 | Freshness limits that exclude props |
@@ -46,7 +48,7 @@ or backend URL appears in client code.
 Full table, costs and terms: [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md).
 
 - **ESPN public JSON** (free, undocumented, opt-in): schedule, box scores, game spreads and totals, injuries, and **DraftKings player props**, including the last quoted lines for this season's finished games. That last feed is what makes a real betting backtest possible.
-- **The Odds API** (authorized; free 500 credits/month, paid from about $30/month): multi-book props with labeled sides. Wired in and unit-tested on fixture payloads. Not exercised live, because no key was provided.
+- **The Odds API** (authorized, free tier: 500 credits/month): FanDuel, BetMGM and Caesars props with labeled sides. Player props are included on the free plan and only markets that return data are charged. A budget allocator makes one pull per slate about 3 hours before the first tip-off and never overspends the monthly quota. Between pulls those quotes go stale (45 min) and cannot qualify; DraftKings via ESPN stays live all day.
 - **Not used:** stats.nba.com (times out), NBA CDN and the official injury PDF (HTTP 403), Basketball Reference (terms), and paid feeds (no purchase authorization).
 
 When a source fails, the affected props are excluded and the gap appears under "Market coverage and

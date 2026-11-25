@@ -22,13 +22,20 @@ class Settings(BaseSettings):
     # costs (markets x regions) credits.
     odds_api_key: str = ""
     odds_api_regions: str = "us"
-    odds_api_bookmakers: str = "draftkings,fanduel,betmgm,williamhill_us"
+    # DraftKings already comes from ESPN; requesting it twice would mix two snapshots of one book.
+    odds_api_bookmakers: str = "fanduel,betmgm,williamhill_us"
+    # Priority order: when the daily credit allowance cannot cover every market for every game,
+    # the allocator keeps the first N.
     odds_api_markets: str = (
-        "player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists,"
+        "player_points,player_rebounds,player_assists,player_points_rebounds_assists,player_threes,"
         "player_points_rebounds,player_points_assists,player_rebounds_assists,player_blocks,"
         "player_steals,player_turnovers,player_blocks_steals"
     )
     odds_api_monthly_credit_budget: int = 500
+    odds_api_pulls_per_day: int = 1  # free tier: one pre-tip snapshot per slate
+    odds_api_lead_hours: float = 3.0  # pull once the next tip-off is within this many hours
+    odds_api_refresh_min: int = 360  # minimum minutes between pulls when pulls_per_day > 1
+    odds_api_reserve_credits: int = 25  # never spend below this many remaining credits
 
     # Optional LLM explanation layer (off unless a key is present).
     anthropic_api_key: str = ""

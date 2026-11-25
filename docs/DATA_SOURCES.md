@@ -33,6 +33,13 @@ be checked. The parser applies that order, then checks every pair against the la
 | Setup | Monthly cost | What you get |
 |---|---|---|
 | Default (ESPN only) | $0 | DraftKings main and alternate lines, double-doubles; no steals/blocks/turnovers markets on this feed |
-| + The Odds API free | $0 | about 4 full-slate refreshes per month with 12 markets × 4 books |
+| + The Odds API free (configured) | $0 | one pre-tip pull per slate for FanDuel, BetMGM, Caesars; markets trimmed by priority to fit (remaining - 25) / days left in the month |
 | + The Odds API 20K plan | about $30 | about 180 full-slate refreshes; cross-book best price and consensus |
 | + historical odds (paid plan) | about $30+ | multi-book backtests since May 2023 (not wired to the backtester yet) |
+
+## The Odds API on the free tier (verified 2026-11-25)
+
+- Player props are available on the free plan through the per-event odds endpoint.
+- Billing: 1 credit per market that returns data, per region, per game. A 12-market request for MIA @ PHI returned 8 markets and cost 8 credits. The `/sports` and `/events` endpoints cost nothing.
+- Schedule: `ODDS_API_PULLS_PER_DAY=1` pull, taken once the next tip-off is within `ODDS_API_LEAD_HOURS=3`. The allowance is (remaining - 25) / days left in the month. Low-priority markets (blocks, steals, turnovers) are dropped first, then the latest games.
+- Verification calls are tagged in `fetch_log` so they do not use up the day's scheduled pull. API keys are redacted from every logged URL.

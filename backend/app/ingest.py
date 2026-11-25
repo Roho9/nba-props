@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .config import get_settings
-from .db import (Game, InjuryReport, Lineup, OddsSnapshot, Player, PlayerGameLog, Team, TeamGameLog,
+from .db import (FetchLog, Game, InjuryReport, Lineup, OddsSnapshot, Player, PlayerGameLog, Team, TeamGameLog,
                  get_engine, session, utcnow)
 from .providers import espn, odds_api
 
@@ -192,7 +193,7 @@ def refresh_slate(slate: str) -> dict:
         store_odds(rows)
         report["props_rows"] += len(rows)
     if odds_api.enabled():
-        report["odds_api"] = refresh_odds_api(events)
+        report["odds_api"] = refresh_odds_api(events) if _odds_api_due(report, events) else report.get("odds_api")
     try:
         report["injuries"] = refresh_injuries()
     except RuntimeError as ex:
@@ -208,29 +209,98 @@ def refresh_slate(slate: str) -> dict:
     return report
 
 
-def refresh_odds_api(events: list[dict]) -> dict:
-    out = {"rows": 0, "unmatched": [], "errors": []}
-    with session() as s:
-        name_to_id = {odds_api.norm_name(n): a for a, n in s.execute(select(Player.athlete_id, Player.name)).all()}
+def _odds_api_due(report: dict, events: list[dict] | None = None) -> bool:
+    """Credits are scarce (free tier 500/month), so Odds API pulls run on their own schedule:
+    at most ODDS_API_PULLS_PER_DAY per slate, at least ODDS_API_REFRESH_MIN apart, and only once
+    the next tip-off is within ODDS_API_LEAD_HOURS (lines are most complete then)."""
+    s = get_settings()
+    now = utcnow()
+    with session() as ss:
+        pulls = ss.scalars(select(FetchLog.at).where(FetchLog.source == "odds_api", FetchLog.ok.is_(True),
+                                                     FetchLog.url.like("%/events/%/odds%"),
+                                                     FetchLog.note.is_distinct_from("verification"))).all()
+    tz = ZoneInfo(s.timezone)
+    today = datetime.now(tz).date()
+    pull_days = {}
+    for at in pulls:  # several event calls make up one pull; group them into pulls by 10-minute gaps
+        pull_days.setdefault(at.replace(tzinfo=timezone.utc).astimezone(tz).date(), []).append(at)
+    todays = sorted(pull_days.get(today, []))
+    n_today = sum(1 for i, at in enumerate(todays) if i == 0 or (at - todays[i - 1]) > timedelta(minutes=10))
+    if n_today >= s.odds_api_pulls_per_day:
+        report["odds_api"] = {"skipped": f"daily pull limit reached ({n_today}/{s.odds_api_pulls_per_day}) to stay inside the free credit quota"}
+        return False
+    last = max(pulls) if pulls else None
+    if last is not None and now - last < timedelta(minutes=s.odds_api_refresh_min):
+        wait = s.odds_api_refresh_min - int((now - last).total_seconds() // 60)
+        report["odds_api"] = {"skipped": f"last pull {last:%H:%M} UTC; next allowed in {wait} min (ODDS_API_REFRESH_MIN)"}
+        return False
+    if events is not None:
+        starts = [e["start_time"] for e in events if e.get("state") == "pre" and e["start_time"] > now]
+        if not starts:
+            report["odds_api"] = {"skipped": "no pregame games left"}
+            return False
+        lead = (min(starts) - now).total_seconds() / 3600
+        if lead > s.odds_api_lead_hours:
+            report["odds_api"] = {"skipped": f"scheduled: pulls once the next tip-off is within {s.odds_api_lead_hours:g} h "
+                                             f"(now {lead:.1f} h away)"}
+            return False
+    return True
+
+
+def daily_allowance(remaining: int, today: date | None = None) -> int:
+    """Credits this slate may spend: what is left above the reserve, spread over the days left in the
+    calendar month (the free quota resets monthly)."""
+    s = get_settings()
+    today = today or datetime.now(ZoneInfo(s.timezone)).date()
+    nxt = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days_left = (nxt - today).days
+    return max(0, (remaining - s.odds_api_reserve_credits) // max(days_left, 1))
+
+
+def plan_pull(n_games: int, allowance: int, markets: list[str]) -> tuple[list[str], int]:
+    """Choose (markets, number of games) so that markets x games <= allowance, keeping all games
+    when possible and dropping the lowest-priority markets first."""
+    if n_games <= 0 or allowance <= 0:
+        return [], 0
+    per_game = min(len(markets), allowance // n_games)
+    if per_game >= 1:
+        return markets[:per_game], n_games
+    return markets[:1], min(n_games, allowance)
+
+
+def refresh_odds_api(events: list[dict], max_games: int | None = None, tag: str | None = None) -> dict:
+    s = get_settings()
+    out = {"rows": 0, "unmatched": [], "errors": [], "games_pulled": 0, "games_skipped_budget": 0}
+    with session() as ss:
+        name_to_id = {odds_api.norm_name(n): a for a, n in ss.execute(select(Player.athlete_id, Player.name)).all()}
     try:
-        oa_events = odds_api.events()
+        oa_events = odds_api.events()  # free call; also reports remaining credits
     except RuntimeError as ex:
         out["errors"].append(str(ex))
         return out
-    abbr_names = {}
-    for e in events:
-        abbr_names[(e["home_team"]["name"], e["away_team"]["name"])] = e
-    for oe in oa_events:
-        e = abbr_names.get((oe["home_team"], oe["away_team"]))
-        if not e or e["state"] != "pre":
-            continue
+    remaining = odds_api.last_remaining if odds_api.last_remaining is not None else 0
+    regions = len(s.odds_api_regions.split(","))
+    by_teams = {(e["home_team"]["name"], e["away_team"]["name"]): e for e in events}
+    todo = []
+    for oe in sorted(oa_events, key=lambda x: x.get("commence_time", "")):  # earliest tip-offs first
+        e = by_teams.get((oe["home_team"], oe["away_team"]))
+        if e and e["state"] == "pre":
+            todo.append((oe, e))
+    if max_games is not None:
+        todo = todo[:max_games]
+    allowance = daily_allowance(remaining) // regions
+    markets, n = plan_pull(len(todo), allowance, odds_api.configured_markets())
+    out.update(credits_before=remaining, allowance=allowance * regions, markets=markets, games_planned=n)
+    out["games_skipped_budget"] = len(todo) - n
+    for oe, e in todo[:n]:
         try:
-            rows, unmatched = odds_api.event_odds(oe["id"], e["game_id"], name_to_id)
+            rows, unmatched = odds_api.event_odds(oe["id"], e["game_id"], name_to_id, markets, tag=tag)
         except RuntimeError as ex:
             out["errors"].append(str(ex))
             break
         store_odds(rows)
         out["rows"] += len(rows)
+        out["games_pulled"] += 1
         out["unmatched"] += unmatched
     out["credits_remaining"] = odds_api.last_remaining
     return out

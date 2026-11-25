@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 
@@ -29,7 +30,7 @@ class RateLimitedClient:
                 time.sleep(self.min_interval_s - gap)
             self._last = time.monotonic()
 
-    def get_json(self, url: str, params: dict | None = None, retries: int = 3, log_fetch: bool = True):
+    def get_json(self, url: str, params: dict | None = None, retries: int = 3, log_fetch: bool = True, tag: str | None = None):
         """Returns (status, json_or_None). 404 is returned, not raised: it means 'not available'."""
         last_err = None
         for attempt in range(retries + 1):
@@ -44,7 +45,7 @@ class RateLimitedClient:
                     time.sleep(min(30, 2 ** attempt * 1.5))
                     continue
                 ok = r.status_code == 200
-                self._record(str(r.url), r.status_code, ok, ms, None, log_fetch)
+                self._record(str(r.url), r.status_code, ok, ms, tag, log_fetch)
                 return r.status_code, (r.json() if ok else None), r.headers
             except (httpx.HTTPError, ValueError) as e:
                 last_err = repr(e)
@@ -56,6 +57,7 @@ class RateLimitedClient:
     def _record(self, url, status, ok, ms, note, enabled):
         if not enabled:
             return
+        url = re.sub(r"(apiKey|api_key|key)=[^&]+", r"\1=REDACTED", url)
         try:
             with session() as s:
                 s.add(FetchLog(source=self.source, url=url[:2000], status=status, ok=ok, elapsed_ms=ms, note=note))

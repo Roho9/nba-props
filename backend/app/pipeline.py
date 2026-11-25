@@ -331,6 +331,14 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
     missing = []
     if not get_settings().odds_api_key:
         missing.append("Only DraftKings (via ESPN) is covered. FanDuel/BetMGM/Caesars need an ODDS_API_KEY.")
+    else:
+        oa = (refresh_report or {}).get("odds_api") or {}
+        if oa.get("skipped"):
+            missing.append(f"The Odds API not pulled this refresh: {oa['skipped']}. Its earlier quotes count as stale after {get_settings().odds_stale_after_min} min.")
+        if oa.get("games_skipped_budget"):
+            missing.append(f"The Odds API: {oa['games_skipped_budget']} game(s) skipped to stay above the credit reserve.")
+        if oa.get("errors"):
+            missing += [f"The Odds API error: {x}" for x in oa["errors"]]
     missing.append("Steals, blocks, steals+blocks and turnovers props are not on the ESPN feed today; they are modeled only when a provider supplies them.")
     missing.append("Confirmed starting lineups are not available pregame from these sources; role is inferred from recent starts.")
     missing += [f"{c['matchup']}: no DraftKings prop board posted yet" for c in cov_out if c["evaluated"] and c["main_props"] == 0]

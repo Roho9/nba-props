@@ -96,16 +96,21 @@ def parse_event_odds(data: dict, game_id: str, name_to_id: dict[str, str], retri
     return rows, sorted(unmatched)
 
 
-def event_odds(event_id: str, game_id: str, name_to_id: dict[str, str]) -> tuple[list[dict], list[str]]:
+def configured_markets() -> list[str]:
+    return [m.strip() for m in get_settings().odds_api_markets.split(",") if m.strip()]
+
+
+def event_odds(event_id: str, game_id: str, name_to_id: dict[str, str],
+               markets: list[str] | None = None, tag: str | None = None) -> tuple[list[dict], list[str]]:
     s = get_settings()
-    markets = [m for m in s.odds_api_markets.split(",") if m]
+    markets = markets or configured_markets()
     cost = len(markets) * len(s.odds_api_regions.split(","))
     if last_remaining is not None and last_remaining < cost:
         raise RuntimeError(f"The Odds API credit budget too low for this call ({last_remaining} left, needs {cost})")
     url = f"{BASE}/sports/basketball_nba/events/{event_id}/odds"
     status, data, headers = client().get_json(url, params={
         "apiKey": s.odds_api_key, "regions": s.odds_api_regions, "markets": ",".join(markets),
-        "bookmakers": s.odds_api_bookmakers, "oddsFormat": "american"})
+        "bookmakers": s.odds_api_bookmakers, "oddsFormat": "american"}, tag=tag)
     _note_remaining(headers)
     if status != 200 or data is None:
         raise RuntimeError(f"The Odds API event odds failed for {event_id} (HTTP {status})")
