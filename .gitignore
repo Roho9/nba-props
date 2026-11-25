@@ -1,0 +1,8 @@
+backend/.venv/
+backend/.env
+backend/data/
+**/__pycache__/
+frontend/node_modules/
+frontend/.next/
+*.tsbuildinfo
+.DS_Store

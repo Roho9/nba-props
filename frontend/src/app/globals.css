@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/* Research-terminal palette. Semantic colors only: good = emerald, caution = amber, risk = red. */
+@theme {
+  --color-bg: #08090b;
+  --color-panel: #0f1114;
+  --color-panel-2: #14171b;
+  --color-line: #1e2228;
+  --color-line-2: #2a2f37;
+  --color-ink: #e7e9ec;
+  --color-mute: #8b929c;
+  --color-faint: #5b626c;
+  --color-up: #10b981;
+  --color-up-dim: #064e3b;
+  --color-down: #ef4444;
+  --color-down-dim: #4c1414;
+  --color-warn: #f59e0b;
+  --color-warn-dim: #45300a;
+  --color-series1: #3987e5;
+  --color-series2: #d95926;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jbmono), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html { color-scheme: dark; }
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "tnum" 1, "cv11" 1;
+  -webkit-font-smoothing: antialiased;
+}
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--color-line-2); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
