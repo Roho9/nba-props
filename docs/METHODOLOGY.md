@@ -35,8 +35,12 @@ Recency-weighted empirical distribution of round(yₖ × m̂/minₖ × opp × te
 
 ## Market
 - Implied probability = 1/decimal odds. No-vig is the proportional two-way normalization. EV per unit = p·(dec−1) − (1−p−p_push).
-- p_final = w·p_M1 + (1−w)·p_novig, with w fit walk-forward on log loss (grid 0..1).
-- p_cons = w·min(P10_M1, p_M2) + (1−w)·p_novig. The ranking key is EV at p_cons.
+- Market reference p_mkt: mean no-vig P(side) of the other books quoting the same line (consensus), else this book's own two-way no-vig, else (alternates) the main line anchored through the model distribution.
+- p_final = w·cal(p_M1) + (1−w)·p_mkt, with w fit walk-forward on log loss (grid 0..1) and cal the walk-forward Platt map (main lines only).
+- p_cons = w·cal(min(P10_M1, p_M2)) + (1−w)·min over other books of their no-vig P(side). The ranking key is EV at p_cons.
+- Uncertainty is measured on p_final (each parameter draw pushed through cal and the blend). Model-only checks (disagreement, outlier dependence) are cautions when w = 0.
+- Stress scenarios move p_final by the model's sensitivity: p = p_final + (p_M1 under scenario − p_M1 at baseline). "Fragile" = 4+ scenarios each dropping p by more than 5 points.
+- Edge = p_final − break-even of the offered price.
 
 ## Validation
 See `backend/app/backtest/run.py` and the Validation page. Weekly walk-forward. Blend weight and

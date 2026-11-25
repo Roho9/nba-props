@@ -10,6 +10,7 @@ export interface SlateRow {
   ev_conservative?: number | null; edge_vs_market?: number | null; risk: string; status: string; reasons: Flag[];
   projection_mean?: number | null; minutes_proj?: number | null; side_verification?: string; retrieved_at?: string;
   game_start: string; model_disagreement?: number | null; fair_american?: number | null; source?: string;
+  market_basis?: string; p_book_novig?: number | null; p_model_raw?: number | null; p_sd_model?: number | null;
 }
 
 export interface Window { n: number; mean: number; median: number; sd: number; iqr: [number, number]; min: number; max: number; hit_rate_vs_line: number; hits: number }
@@ -17,7 +18,7 @@ export interface GameRow { date: string; opp: string; home: boolean; minutes: nu
 export interface Scenario { code: string; label: string; p: number; delta: number; ev: number }
 
 export interface Candidate extends SlateRow {
-  rank: number; p_interval: [number, number]; p_push: number; overround?: number | null; blend_weight: number;
+  rank: number; watchlist_reasons?: string[]; p_interval: [number, number]; p_push: number; overround?: number | null; blend_weight: number;
   outlier_dependence?: number | null; prediction_id?: number;
   history: {
     windows: Record<string, Window>;
@@ -45,7 +46,7 @@ export interface Candidate extends SlateRow {
 
 export interface Overview {
   slate_date: string; timezone: string; generated_at: string; run_id: number; n_games: number; n_games_evaluated: number;
-  n_players: number; n_props: number; n_offers: number; n_qualifying: number; n_passed_filters: number; books: string[];
+  n_players: number; n_props: number; n_offers: number; n_qualifying: number; n_passed_filters: number; n_watchlist_eligible?: number; n_watchlist_shown?: number; books: string[];
   odds_freshest: string | null; odds_oldest: string | null; injury_report_at: string | null; injury_source: string;
   last_successful_run: string | null;
   validation: { validated: boolean; reason: string; blend_weight: number; min_edge: number; report_generated_at: string | null };

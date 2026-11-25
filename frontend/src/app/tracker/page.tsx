@@ -15,6 +15,7 @@ interface Tracker {
   rows: TRow[]; n: number; settled: number; wins: number; units: number; max_drawdown: number;
   equity: { date: string; units: number }[]; calibration: { bin: string; n: number; predicted: number; observed: number }[];
   rolling: { n: number; rolling_hit_rate_20: number }[]; note: string;
+  by_status?: Record<string, { settled: number; wins: number; units: number }>;
 }
 
 export default function TrackerPage() {
@@ -32,6 +33,15 @@ export default function TrackerPage() {
           <Stat label="Max drawdown" value={t.max_drawdown.toFixed(2)} tone="bad" />
           <Stat label="Rolling 20 hit rate" value={t.rolling.length ? pct(t.rolling[t.rolling.length - 1].rolling_hit_rate_20) : "n/a"} />
         </div>
+        {t.by_status && (
+          <table className="mt-4 text-[12px]">
+            <thead className="text-left text-faint"><tr><th className="pr-6">Status</th><th className="pr-6">Settled</th><th className="pr-6">Hit rate</th><th>Paper units</th></tr></thead>
+            <tbody className="num">{Object.entries(t.by_status).map(([k, v]) => (
+              <tr key={k} className="border-t border-line/60"><td className="py-0.5 pr-6 font-sans">{k.replace("_", " ")}</td><td>{v.settled}</td>
+                <td>{v.settled ? pct(v.wins / v.settled) : "n/a"}</td><td className={v.units >= 0 ? "text-up" : "text-down"}>{v.units.toFixed(2)}</td></tr>))}</tbody>
+          </table>
+        )}
+        <p className="mt-2 text-[11px] text-faint">Watchlist entries are tracked separately: they were never recommendations, so they must not flatter or drag the pick record.</p>
         {t.settled < 30 && <p className="mt-3 text-[12px] text-warn">Fewer than 30 settled predictions: these numbers are dominated by noise and say little about the method.</p>}
       </Card>
       <div className="grid gap-4 lg:grid-cols-2">
@@ -50,7 +60,7 @@ export default function TrackerPage() {
                   <td className="py-1">{r.date}</td><td className="font-sans">{r.player} <span className="text-faint">{r.team} v {r.opp}</span></td>
                   <td className="font-sans">{r.side} {r.market}</td><td>{r.line}</td><td>{am(r.american)}</td><td className="font-sans">{r.book}</td>
                   <td>{pct(r.p_model)}</td><td>{pct(r.p_conservative)}</td>
-                  <td className="font-sans">{r.status === "qualified" ? <Badge tone="good">qualified</Badge> : <Badge>research only</Badge>}
+                  <td className="font-sans">{r.status === "qualified" ? <Badge tone="good">qualified</Badge> : r.status === "watchlist" ? <Badge>watchlist</Badge> : <Badge tone="warn">research only</Badge>}
                     {r.invalidated_at && <span title={r.invalidation_reason ?? ""}><Badge tone="bad">invalidated</Badge></span>}</td>
                   <td className="text-faint">{r.model_version}</td><td className="text-mute">{dateTime(r.created_at)}</td>
                   <td>{r.closing_line != null ? `${r.closing_line} @ ${am(r.closing_american)}` : "n/a"}</td>

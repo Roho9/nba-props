@@ -54,7 +54,7 @@ def side_probs(proj: Projection, line: float, side: str) -> dict:
     emp = proj.emp_probs(line)
     p_m1 = pr["p_over"] if side == "over" else pr["p_under"]
     p_m2 = None if emp is None else (emp["p_over"] if side == "over" else emp["p_under"])
-    return {"p_m1": p_m1, "p_m2": p_m2, "p_push": pr["p_push"], "p_sd": float(np.std(draws)),
+    return {"p_m1": p_m1, "p_m2": p_m2, "p_push": pr["p_push"], "p_sd": float(np.std(draws)), "draws": draws,
             "p_p10": float(np.percentile(draws, 10)), "p_p90": float(np.percentile(draws, 90)),
             "disagreement": None if p_m2 is None else abs(p_m1 - p_m2)}
 
@@ -75,43 +75,68 @@ def outlier_dependence(proj: Projection, line: float, side: str) -> float | None
 
 def evaluate_quote(proj: Projection, line: float, side: str, american: int, other_american: int | None,
                    gate: Gate, flags_in: list[dict], anchor: tuple[float, float] | None = None,
-                   calibrate: bool = True) -> dict:
-    """calibrate=False for alternate lines: the recalibration map was fit on main lines only and is
-    not valid in the tails (extrapolating a shallow slope would inflate long-shot probabilities)."""
-    """anchor = (main_line, no-vig P(over main_line)) for one-sided alternate lines."""
+                   calibrate: bool = True, consensus_over: list[float] | None = None) -> dict:
+    """Evaluate one quoted side.
+
+    Market reference, in order of preference:
+      consensus_over = no-vig P(over) from each OTHER book at the same line (their mean is the reference,
+      and the least favorable of them feeds the conservative probability);
+      the quote's own two-way no-vig price; for one-sided alternates, `anchor` = (main line,
+      no-vig P(over main line)).
+    calibrate=False for alternate lines: the recalibration map was fit on main lines only and is
+    not valid in the tails.
+    """
     s = get_settings()
     sp = side_probs(proj, line, side)
-    p_nv = None
-    overround = None
-    market_basis = "none"
+    p_book = overround = None
     if other_american is not None:
-        p_nv, overround = no_vig_two_way(american, other_american)
-        market_basis = "two-way no-vig"
+        p_book, overround = no_vig_two_way(american, other_american)
+    p_nv, market_basis, p_nv_cons = None, "none", None
+    if consensus_over and side in ("over", "under"):
+        side_ps = [p if side == "over" else 1 - p for p in consensus_over]
+        p_nv, p_nv_cons = float(np.mean(side_ps)), float(min(side_ps))
+        market_basis = f"consensus of {len(side_ps)} other book(s)"
+    elif p_book is not None:
+        p_nv, market_basis = p_book, "own two-way no-vig"
     elif anchor is not None and side == "over":
         p_nv = proj.anchored_over(anchor[0], anchor[1], line)
         market_basis = "anchored to main line" if p_nv is not None else "none"
     w = gate.blend_weight if p_nv is not None else 1.0
+    model_used = w > 0
     cal = lambda p: calibrate_side(p, side, gate.calib) if calibrate and side in ("over", "under") else p
+    to_final = lambda p: w * cal(p) + (1 - w) * p_nv if p_nv is not None else cal(p)
     p_model = cal(sp["p_m1"])
-    p_final = w * p_model + (1 - w) * p_nv if p_nv is not None else p_model
-    p_cons_model = cal(min(sp["p_p10"], sp["p_m2"]) if sp["p_m2"] is not None else sp["p_p10"])
-    p_cons = w * p_cons_model + (1 - w) * p_nv if p_nv is not None else p_cons_model
+    p_final = to_final(sp["p_m1"])
+    p_cons_raw = min(sp["p_p10"], sp["p_m2"]) if sp["p_m2"] is not None else sp["p_p10"]
+    if p_nv_cons is None:
+        p_nv_cons = p_nv
+    p_cons = w * cal(p_cons_raw) + (1 - w) * p_nv_cons if p_nv is not None else cal(p_cons_raw)
+    # Uncertainty of the probability actually used (after recalibration and market blending).
+    final_draws = np.array([to_final(float(x)) for x in sp["draws"][:: max(1, len(sp["draws"]) // 100)]])
+    p_sd = float(final_draws.std())
+    p_lo, p_hi = float(np.percentile(final_draws, 10)), float(np.percentile(final_draws, 90))
     be = implied_prob(american)
     ev = ev_per_unit(p_final, american, sp["p_push"])
     ev_cons = ev_per_unit(p_cons, american, sp["p_push"])
     flags = list(flags_in)
-    if sp["p_sd"] > s.max_prob_sd:
+    model_sev = "exclude" if model_used else "caution"
+    unused = "" if model_used else " (informational: the model has 0% weight against the market)"
+    if p_sd > s.max_prob_sd:
         flags.append({"code": "uncertain_probability", "severity": "exclude",
-                      "text": f"Probability uncertainty too high (sd {sp['p_sd']:.3f} > {s.max_prob_sd})."})
+                      "text": f"Probability uncertainty too high (sd {p_sd:.3f} > {s.max_prob_sd})."})
     if sp["disagreement"] is None:
-        flags.append({"code": "no_second_model", "severity": "exclude", "text": "Empirical cross-check unavailable (too few games >= 10 minutes)."})
+        flags.append({"code": "no_second_model", "severity": model_sev,
+                      "text": "Empirical cross-check unavailable (too few games >= 10 minutes)." + unused})
     elif sp["disagreement"] > s.max_model_disagreement:
-        flags.append({"code": "model_disagreement", "severity": "exclude",
-                      "text": f"Models disagree by {sp['disagreement']:.3f} (limit {s.max_model_disagreement})."})
+        flags.append({"code": "model_disagreement", "severity": model_sev,
+                      "text": f"Models disagree by {sp['disagreement']:.3f} (limit {s.max_model_disagreement})." + unused})
     od = outlier_dependence(proj, line, side)
     if od is not None and od > 0.12:
-        flags.append({"code": "outlier_dependence", "severity": "exclude",
-                      "text": f"Removing the two most favorable past games cuts the empirical probability by {od:.2f}."})
+        flags.append({"code": "outlier_dependence", "severity": model_sev,
+                      "text": f"Removing the two most favorable past games cuts the empirical probability by {od:.2f}." + unused})
+    if consensus_over is not None and len(consensus_over) < 2:
+        flags.append({"code": "thin_consensus", "severity": "exclude",
+                      "text": "Only one other book quotes this line: a single book cannot show which price is off-market."})
     if p_nv is None and not gate.validated:
         flags.append({"code": "no_market_reference", "severity": "exclude",
                       "text": "No two-way or anchored market probability for this line; the EV shown is the unvalidated "
@@ -122,12 +147,13 @@ def evaluate_quote(proj: Projection, line: float, side: str, american: int, othe
     if ev <= 0:
         flags.append({"code": "negative_ev", "severity": "exclude", "text": f"Point-estimate EV {ev:+.3f}/unit is not positive."})
     return {"line": line, "side": side, "american": american, "other_american": other_american,
-            "p_model": round(p_model, 4), "p_model_raw": round(sp["p_m1"], 4), "p_empirical": None if sp["p_m2"] is None else round(sp["p_m2"], 4),
-            "p_final": round(p_final, 4), "p_conservative": round(p_cons, 4), "p_sd": round(sp["p_sd"], 4),
-            "p_interval": [round(sp["p_p10"], 4), round(sp["p_p90"], 4)], "p_push": round(sp["p_push"], 4),
-            "p_market_novig": None if p_nv is None else round(p_nv, 4),
+            "p_model": round(p_model, 4), "p_model_raw": round(sp["p_m1"], 4),
+            "p_empirical": None if sp["p_m2"] is None else round(sp["p_m2"], 4),
+            "p_final": round(p_final, 4), "p_conservative": round(p_cons, 4), "p_sd": round(p_sd, 4),
+            "p_sd_model": round(sp["p_sd"], 4), "p_interval": [round(p_lo, 4), round(p_hi, 4)], "p_push": round(sp["p_push"], 4),
+            "p_market_novig": None if p_nv is None else round(p_nv, 4), "p_book_novig": None if p_book is None else round(p_book, 4),
             "overround": None if overround is None else round(overround, 4), "break_even": round(be, 4),
-            "edge_vs_market": None if p_nv is None else round(p_final - p_nv, 4),
+            "edge_vs_market": round(p_final - be, 4),  # probability edge over the price's break-even
             "ev": round(ev, 4), "ev_conservative": round(ev_cons, 4), "blend_weight": w,
             "model_disagreement": None if sp["disagreement"] is None else round(sp["disagreement"], 4), "market_basis": market_basis,
             "outlier_dependence": None if od is None else round(od, 4), "flags": flags}
@@ -175,30 +201,34 @@ def player_flags(proj: Projection, injury_status: str | None, side_verification:
 
 
 def stress_test(project_fn, base: dict) -> dict:
-    """project_fn(overrides) -> Projection. Returns per-scenario probability changes for the side."""
+    """project_fn(overrides) -> Projection. Each scenario moves the FINAL probability by the model's
+    sensitivity: p = p_final + (raw model p under the scenario - raw model p at baseline). The market
+    sets the level; the model's distribution says how far adverse conditions would move it."""
     out = []
-    worst = base["p_model"]
+    p0, raw0 = base["p_final"], base["p_model_raw"]
+    adj = lambda raw: float(np.clip(p0 + (raw - raw0), 0.001, 0.999))
     for code, label, ov in STRESS_SCENARIOS:
         pj = project_fn(ov)
         if not pj.ok:
             continue
         sp = side_probs(pj, base["line"], base["side"])
-        out.append({"code": code, "label": label, "p": round(sp["p_m1"], 4), "delta": round(sp["p_m1"] - base["p_model"], 4),
-                    "ev": round(ev_per_unit(sp["p_m1"], base["american"], sp["p_push"]), 4)})
-        worst = min(worst, sp["p_m1"])
-    # market moves: line one point against, price 15 cents worse
+        p = adj(sp["p_m1"])
+        out.append({"code": code, "label": label, "p": round(p, 4), "delta": round(p - p0, 4),
+                    "ev": round(ev_per_unit(p, base["american"], sp["p_push"]), 4)})
     pj = project_fn({})
     bad_line = base["line"] + (1 if base["side"] == "over" else -1)
     sp = side_probs(pj, bad_line, base["side"])
-    out.append({"code": "line_moves_against", "label": f"Line moves 1 point against (to {bad_line})", "p": round(sp["p_m1"], 4),
-                "delta": round(sp["p_m1"] - base["p_model"], 4), "ev": round(ev_per_unit(sp["p_m1"], base["american"], sp["p_push"]), 4)})
+    p = adj(sp["p_m1"])
+    out.append({"code": "line_moves_against", "label": f"Line moves 1 point against (to {bad_line})", "p": round(p, 4),
+                "delta": round(p - p0, 4), "ev": round(ev_per_unit(p, base["american"], sp["p_push"]), 4)})
     a = base["american"]
     worse = a - 15 if a < 0 else (a - 15 if a - 15 >= 100 else -100 - (15 - (a - 100)))
-    out.append({"code": "odds_worse", "label": f"Price worsens to {worse:+d}", "p": base["p_model"], "delta": 0.0,
-                "ev": round(ev_per_unit(base["p_final"], worse, base["p_push"]), 4)})
-    deltas = sorted([o for o in out if o["code"] not in ("odds_worse",)], key=lambda o: o["delta"])
-    return {"scenarios": out, "worst_p": round(worst, 4), "most_sensitive": [o["code"] for o in deltas[:3]],
-            "n_scenarios_below_break_even": sum(1 for o in out if o["p"] < base["break_even"])}
+    out.append({"code": "odds_worse", "label": f"Price worsens to {worse:+d}", "p": p0, "delta": 0.0,
+                "ev": round(ev_per_unit(p0, worse, base["p_push"]), 4)})
+    deltas = sorted([o for o in out if o["code"] != "odds_worse"], key=lambda o: o["delta"])
+    return {"scenarios": out, "worst_p": round(min(o["p"] for o in out), 4), "most_sensitive": [o["code"] for o in deltas[:3]],
+            "n_scenarios_below_break_even": sum(1 for o in out if o["p"] < base["break_even"]),
+            "n_large_drops": sum(1 for o in out if o["code"] != "odds_worse" and o["delta"] < -0.05)}
 
 
 def stress_flags(st: dict, base: dict) -> list[dict]:
@@ -212,9 +242,9 @@ def stress_flags(st: dict, base: dict) -> list[dict]:
     if "teammate_returns" in by and by["teammate_returns"]["delta"] < -0.06:
         f.append({"code": "teammate_assumption", "severity": "exclude",
                   "text": "Edge depends on a teammate's absence: a surprise return erases it."})
-    if st["n_scenarios_below_break_even"] >= 4:
+    if st["n_large_drops"] >= 4:
         f.append({"code": "fragile", "severity": "exclude",
-                  "text": f"{st['n_scenarios_below_break_even']} stress scenarios push the probability below break-even."})
+                  "text": f"{st['n_large_drops']} stress scenarios each cut the probability by more than 5 points."})
     return f
 
 

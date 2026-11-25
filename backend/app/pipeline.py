@@ -26,6 +26,8 @@ from .risk.engine import Gate, evaluate_quote, pick_top, player_flags, risk_clas
 
 log = logging.getLogger("pipeline")
 SLATE_PATH = BACKEND_DIR / "data" / "latest_slate.json"
+# A prop may fill an empty Top 3 slot as a labeled watchlist entry if its only failures are on price.
+WATCHLIST_ALLOWED = {"negative_ev", "negative_conservative_ev", "thin_consensus"}
 _lock = threading.Lock()
 state = {"running": False, "last_error": None, "last_started": None}
 
@@ -182,11 +184,26 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
     quotes = latest_quotes([g.game_id for g in pre_games]) if pre_games else pd.DataFrame()
     gmap = {g.game_id: g for g in games}
     day = int(to_day([slate])[0])
-    rows, candidates, coverage = [], [], defaultdict(lambda: {"main_props": 0, "alt_props": 0, "players": set()})
+    rows, candidates, watch, coverage = [], [], [], defaultdict(lambda: {"main_props": 0, "alt_props": 0, "players": set()})
     proj_cache = {}
     if not quotes.empty:
         quotes = quotes.copy()
         stale_cut = now - timedelta(minutes=s.odds_stale_after_min)
+        # Cross-book consensus: each quote is priced against the mean no-vig P(over) of the OTHER books
+        # quoting the same player, market and line (fresh quotes with known sides only). A book's own
+        # two-way price cannot reveal that book's mispricing; the rest of the market can.
+        consensus_src: dict[tuple, dict[str, float]] = defaultdict(dict)
+        ref = quotes[(quotes["kind"] == "main") & (quotes["retrieved_at"] >= stale_cut)
+                     & quotes["side_verification"].isin(["labeled", "ladder_verified"])]
+        for (cg, ca, cm, cl, cb), g2 in ref.groupby(["game_id", "athlete_id", "market", "line", "book"]):
+            sd2 = dict(zip(g2["side"], g2["american"]))
+            if "over" in sd2 and "under" in sd2:
+                consensus_src[(cg, ca, cm, float(cl))][cb] = no_vig_two_way(int(sd2["over"]), int(sd2["under"]))[0]
+
+        def consensus_for(cg, ca, cm, cl, cb):
+            others = [p for b, p in consensus_src.get((cg, ca, cm, float(cl)), {}).items() if b != cb]
+            return others or None
+
         for (gid, aid, mkt), grp in quotes.groupby(["game_id", "athlete_id", "market"]):
             g = gmap[gid]
             name = grp["athlete_name"].dropna().iloc[0] if grp["athlete_name"].notna().any() else h.players["name"].get(aid, aid)
@@ -254,7 +271,8 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
                         flags.append({"code": "validation_gate", "severity": "gate", "text": gate.reason})
                     ev = evaluate_quote(proj, float(line), side, int(q["american"]), None if other is None else int(other["american"]),
                                         gate, flags, anchor=anchors.get(book) if kind == "alt" else None,
-                                        calibrate=kind == "main")
+                                        calibrate=kind == "main",
+                                        consensus_over=consensus_for(gid, aid, mkt, line, book) if kind == "main" else None)
                     row = {**base, "line": float(line), "side": side, "kind": kind, "book": book, "american": int(q["american"]),
                            "open_line": q["open_line"], "open_american": None if pd.isna(q["open_american"]) else int(q["open_american"]),
                            "first_seen_american": None if pd.isna(q["first_seen_american"]) else int(q["first_seen_american"]),
@@ -263,38 +281,61 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
                            "projection_mean": round(float(proj.mu_grid.mean()), 2), "minutes_proj": round(proj.minutes_mean, 1),
                            **{k: ev[k] for k in ("p_model", "p_empirical", "p_final", "p_conservative", "p_sd", "p_interval", "p_push",
                                                  "p_market_novig", "overround", "break_even", "edge_vs_market", "ev", "ev_conservative",
-                                                 "model_disagreement", "outlier_dependence", "blend_weight", "market_basis")},
+                                                 "model_disagreement", "outlier_dependence", "blend_weight", "market_basis",
+                                                 "p_book_novig", "p_model_raw", "p_sd_model")},
                            "fair_american": fair_american(ev["p_final"]), "reasons": ev["flags"]}
                     excl = [f for f in ev["flags"] if f["severity"] == "exclude"]
                     row["risk"] = risk_class(ev["flags"], ev["p_sd"], proj.diagnostics.get("minutes_cv", 1))
                     row["status"] = "rejected" if excl else "candidate"
                     rows.append(row)
+                    item = {"row": row, "eval": ev, "athlete_id": aid, "game_id": gid, "key": (gid, aid, mkt)}
                     if not excl:
-                        candidates.append({"row": row, "eval": ev, "athlete_id": aid, "game_id": gid, "key": (gid, aid, mkt)})
+                        candidates.append(item)
+                    elif {f["code"] for f in excl} <= WATCHLIST_ALLOWED:
+                        watch.append(item)  # passes every data, availability and stability check; fails only on price
 
-    # Stress-test survivors (most expensive step, so only here)
-    survivors = []
-    for c in sorted(candidates, key=lambda c: c["eval"]["ev_conservative"], reverse=True)[:40]:
-        proj, ctx, g = proj_cache[c["key"]]
-        st = stress_test(lambda ov: project(h, c["athlete_id"], c["row"]["market"], day, g.season, ctx, overrides=ov,
-                                            B=80, S=200), {**c["eval"]})
-        sf = stress_flags(st, c["eval"])
-        c["row"]["stress"] = st
-        c["row"]["reasons"] = c["row"]["reasons"] + sf
-        if any(f["severity"] == "exclude" for f in sf):
-            c["row"]["status"], c["row"]["risk"] = "rejected", "Excluded"
-            continue
-        survivors.append(c)
-    for c in candidates[40:]:
-        pass
+    # Stress-test the best candidates and watchlist props (most expensive step, so only here)
+    def run_stress(items):
+        kept = []
+        for c in sorted(items, key=lambda c: c["eval"]["ev_conservative"], reverse=True)[:40]:
+            proj, ctx, g = proj_cache[c["key"]]
+            st = stress_test(lambda ov: project(h, c["athlete_id"], c["row"]["market"], day, g.season, ctx, overrides=ov,
+                                                B=80, S=200), {**c["eval"]})
+            sf = stress_flags(st, c["eval"])
+            c["row"]["stress"] = st
+            c["row"]["reasons"] = c["row"]["reasons"] + sf
+            if any(f["severity"] == "exclude" for f in sf):
+                c["row"]["status"], c["row"]["risk"] = "rejected", "Excluded"
+                continue
+            kept.append(c)
+        return kept
+
+    survivors = run_stress(candidates)
+    watch_survivors = run_stress(watch)
     top = pick_top(survivors, 3)
-    shortlisted_ids = set()
+    for c in top:
+        c["row"]["status"] = "qualified" if gate.validated else "research_only"
+    # Fill any empty slots with the research watchlist: props that clear every data, availability,
+    # stability and stress check but not the price. They are labeled as such and never as picks.
+    used_players, used_games = {c["athlete_id"] for c in top}, {c["game_id"] for c in top}
+    for c in sorted(watch_survivors, key=lambda c: c["eval"]["ev_conservative"], reverse=True):
+        if len(top) == 3:
+            break
+        if c["athlete_id"] in used_players or c["game_id"] in used_games:
+            continue
+        c["row"]["status"] = "watchlist"
+        # risk class from the non-price checks only (the price failures are why it is a watchlist entry)
+        non_price = [f for f in c["row"]["reasons"] if f["code"] not in WATCHLIST_ALLOWED]
+        c["row"]["risk"] = risk_class(non_price, c["eval"]["p_sd"], proj_cache[c["key"]][0].diagnostics.get("minutes_cv", 1))
+        c["row"]["watchlist_reasons"] = [f["text"] for f in c["row"]["reasons"] if f["code"] in WATCHLIST_ALLOWED]
+        top.append(c)
+        used_players.add(c["athlete_id"])
+        used_games.add(c["game_id"])
     published = []
     for rank, c in enumerate(top, 1):
         r = c["row"]
         proj, ctx, g = proj_cache[c["key"]]
         r["rank"] = rank
-        r["status"] = "qualified" if gate.validated else "research_only"
         r["history"] = _history_payload(h, c["athlete_id"], r["market"], day, r["line"], ctx.opp_team_id, teams)
         r["distribution"] = proj.summary_dist(get_settings().mc_seed)
         r["diagnostics"] = _jsonable(proj.diagnostics)
@@ -304,7 +345,6 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
         r["shared_risk"] = [o["row"]["athlete_name"] for o in top if o is not c and o["game_id"] == c["game_id"]]
         r["sources"] = _sources(r, injuries.get(c["athlete_id"]))
         r["injury_signature"] = _injury_signature(injuries, {ctx.team_id, ctx.opp_team_id})
-        shortlisted_ids.add(id(r))
         published.append(r)
     for r in rows:
         if r["status"] == "candidate":
@@ -349,7 +389,8 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
         "n_games": len(games), "n_games_evaluated": len(pre_games),
         "n_players": len({r["athlete_id"] for r in rows}), "n_props": len({(r["game_id"], r["athlete_id"], r["market"], r["line"], r["kind"]) for r in rows}),
         "n_offers": n_quotes, "n_qualifying": sum(1 for r in published if r["status"] == "qualified"),
-        "n_passed_filters": len(survivors), "books": sorted(quotes["book"].unique().tolist()) if not quotes.empty else [],
+        "n_passed_filters": len(survivors), "n_watchlist_eligible": len(watch_survivors),
+        "n_watchlist_shown": sum(1 for r in published if r["status"] == "watchlist"), "books": sorted(quotes["book"].unique().tolist()) if not quotes.empty else [],
         "odds_freshest": quotes["retrieved_at"].max() if not quotes.empty else None,
         "odds_oldest": quotes["retrieved_at"].min() if not quotes.empty else None,
         "injury_report_at": inj_at, "injury_source": "ESPN injuries feed (official NBA PDF report is blocked for automated access)",
@@ -371,7 +412,7 @@ def _slim(r: dict) -> dict:
             "book", "american", "open_line", "open_american", "first_seen_american", "p_model", "p_empirical", "p_final",
             "p_conservative", "p_sd", "p_market_novig", "break_even", "ev", "ev_conservative", "edge_vs_market", "risk", "status",
             "reasons", "projection_mean", "minutes_proj", "side_verification", "retrieved_at", "game_start", "model_disagreement",
-            "fair_american", "source", "market_basis")
+            "fair_american", "source", "market_basis", "p_book_novig")
     return {k: r.get(k) for k in keep}
 
 
@@ -487,7 +528,7 @@ def invalidate(slate: str, result: dict):
                 reasons.append("Quote no longer offered at this line.")
             elif q["line"] != p.line:
                 reasons.append(f"Line moved from {p.line} to {q['line']}.")
-            elif q.get("ev_conservative") is not None and q["ev_conservative"] <= 0:
+            elif p.status != "watchlist" and q.get("ev_conservative") is not None and q["ev_conservative"] <= 0:
                 reasons.append(f"Conservative EV is now {q['ev_conservative']:+.3f} at {q['american']:+d}.")
             if reasons:
                 p.invalidated_at = utcnow()
@@ -566,7 +607,13 @@ def tracker_summary() -> dict:
     for i in range(len(res)):
         w = res[max(0, i - 19): i + 1]
         roll.append({"n": i + 1, "rolling_hit_rate_20": round(float(np.mean(w)), 3)})
-    return {"rows": rows[::-1], "n": len(rows), "settled": len(settled),
+    by_status = {}
+    for st_name in ("qualified", "research_only", "watchlist"):
+        sub = [r for r in rows if r["status"] == st_name and r["result"] in ("win", "loss", "push", "void")]
+        wl = [r for r in sub if r["result"] in ("win", "loss")]
+        by_status[st_name] = {"settled": len(wl), "wins": sum(1 for r in wl if r["result"] == "win"),
+                              "units": round(sum(r["paper_profit"] or 0 for r in sub), 3)}
+    return {"rows": rows[::-1], "n": len(rows), "settled": len(settled), "by_status": by_status,
             "wins": sum(1 for r in settled if r["result"] == "win"), "units": round(units, 3), "max_drawdown": round(mdd, 3),
             "equity": eq, "calibration": calib, "rolling": roll,
             "note": "Paper tracking only, 1 unit per published candidate, including research-only candidates."}

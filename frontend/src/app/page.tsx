@@ -85,22 +85,30 @@ function OverviewPanel({ o }: { o: Overview }) {
   );
 }
 
+function statusBadge(status: string): { tone: "good" | "warn" | "mute"; label: string } {
+  if (status === "qualified") return { tone: "good", label: "QUALIFIED" };
+  if (status === "research_only") return { tone: "warn", label: "RESEARCH ONLY · +EV, UNVALIDATED" };
+  return { tone: "mute", label: "WATCHLIST · NOT A PICK" };
+}
+
 function TopThree({ o, cands }: { o: Overview; cands: Candidate[] }) {
-  const qualified = cands.filter((c) => c.status === "qualified");
+  const nWatch = cands.filter((c) => c.status === "watchlist").length;
+  const nResearch = cands.filter((c) => c.status === "research_only").length;
   return (
     <div className="space-y-3">
       {o.headline && (
         <div className="rounded-lg border border-warn/50 bg-warn-dim/30 px-5 py-4">
           <div className="text-base font-semibold tracking-wide text-warn">{o.headline}</div>
-          <div className="mt-1 text-[12.5px] text-mute">
-            Avoiding all wagers today is the rational conclusion under this system&apos;s rules.
-            {cands.length > 0 && " The props below ranked highest on conservative EV but are research only: they did not clear the validation gate."}
+          <div className="mt-1 space-y-1 text-[12.5px] text-mute">
+            <p>Avoiding all wagers today is the rational conclusion under this system&apos;s rules.</p>
+            {nResearch > 0 && <p>{nResearch} slot(s) hold props with positive EV against the other books&apos; consensus price. That signal has not been validated historically (no free multi-book history exists), so they are research only.</p>}
+            {nWatch > 0 && <p>{nWatch} slot(s) hold the research watchlist: props that pass every data, availability, stability and stress check but fail a market check (negative EV, or only one other book to compare against). Each card says which. They show what is closest to playable, not what to play.</p>}
           </div>
         </div>
       )}
       <div className="grid gap-3 lg:grid-cols-3">
         {[0, 1, 2].map((i) => {
-          const c = (qualified.length ? qualified : cands)[i];
+          const c = cands[i];
           if (!c) return (
             <div key={i} className="flex min-h-[220px] items-center justify-center rounded-lg border border-dashed border-line-2 p-4 text-center text-[12.5px] text-mute">
               Slot {i + 1} empty: no{i > 0 ? " further" : ""} prop passed every hard filter and stress test with positive conservative EV.
@@ -117,7 +125,7 @@ function CandidateCard({ c }: { c: Candidate }) {
   const l20 = c.history?.windows?.L20;
   const evLoss = -1;
   return (
-    <div className={`rounded-lg border bg-panel p-4 ${c.status === "qualified" ? "border-up/40" : "border-line-2"}`}>
+    <div className={`rounded-lg border bg-panel p-4 ${c.status === "qualified" ? "border-up/40" : c.status === "watchlist" ? "border-dashed border-line-2" : "border-warn/40"}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="text-[11px] text-faint">#{c.rank} · {c.matchup} · {time(c.game_start)}</div>
@@ -128,20 +136,26 @@ function CandidateCard({ c }: { c: Candidate }) {
           </div>
         </div>
         <div className="flex flex-col items-end gap-1">
-          <Badge tone={c.status === "qualified" ? "good" : "warn"}>{c.status === "qualified" ? "QUALIFIED" : "RESEARCH ONLY"}</Badge>
+          <Badge tone={statusBadge(c.status).tone}>{statusBadge(c.status).label}</Badge>
           <Badge tone={riskTone(c.risk)}>{c.risk} risk</Badge>
         </div>
       </div>
+      {c.status === "watchlist" && (c.watchlist_reasons?.length ?? 0) > 0 && (
+        <div className="mt-2 rounded border border-line-2 bg-panel-2 px-2.5 py-1.5 text-[11.5px] leading-snug text-mute">
+          Not a pick: {c.watchlist_reasons!.join(" ")}
+        </div>
+      )}
       <div className="mt-3 grid grid-cols-3 gap-3">
-        <Stat label="Estimate" value={pct(c.p_final)} sub={`±${pct(c.p_sd)} sd`} />
+        <Stat label="Estimate" value={pct(c.p_final)} sub={c.blend_weight === 0 ? "market-based" : `±${pct(c.p_sd)} sd`} />
         <Stat label="Conservative" value={pct(c.p_conservative)} sub="lower bound used" />
-        <Stat label="Break-even" value={pct(c.break_even)} sub={`no-vig ${pct(c.p_market_novig)}`} />
+        <Stat label="Break-even" value={pct(c.break_even)} sub={`market ${pct(c.p_market_novig)}`} />
       </div>
       <div className="mt-3">
         <KV k="Model projection" v={`${num(c.projection_mean)} on ${num(c.minutes_proj)} min`} />
         <KV k="EV per unit (point / conservative)" v={`${signed(c.ev)} / ${signed(c.ev_conservative)}`} tone={(c.ev_conservative ?? 0) > 0 ? "good" : "bad"} />
         <KV k="Potential loss per unit" v={`${evLoss.toFixed(2)} (if it misses)`} tone="bad" />
         <KV k="Historical hit rate, last 20" v={l20 ? `${l20.hits}/${l20.n} (${pct(l20.hit_rate_vs_line, 0)})` : "n/a"} />
+        <KV k="Market reference" v={c.market_basis ?? "n/a"} />
         <KV k="Odds data" v={`${ago(c.retrieved_at)} · ${c.side_verification}`} />
       </div>
       {c.shared_risk?.length > 0 && <div className="mt-2 text-[11px] text-warn">Shares a game with: {c.shared_risk.join(", ")}</div>}
@@ -170,7 +184,7 @@ function Breakdown({ c }: { c: Candidate }) {
       <button onClick={() => setOpen(!open)} className="flex items-center gap-2 text-left">
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         #{c.rank} {c.athlete_name} · {c.side.toUpperCase()} {c.line} {c.market_label} · {am(c.american)} {c.book}
-      </button>} right={<Badge tone={c.status === "qualified" ? "good" : "warn"}>{c.status === "qualified" ? "Qualified" : "Research only"}</Badge>}>
+      </button>} right={<Badge tone={statusBadge(c.status).tone}>{statusBadge(c.status).label}</Badge>}>
       {!open ? <div className="text-[12px] text-mute">{ex.thesis}</div> : (
         <div className="space-y-5">
           <Section title="Research thesis">
@@ -202,7 +216,9 @@ function Breakdown({ c }: { c: Candidate }) {
               <KV k="Conservative probability" v={pct(c.p_conservative)} />
               <KV k="Push probability" v={pct(c.p_push)} />
               <KV k="Break-even at offered price" v={pct(c.break_even)} />
-              <KV k="No-vig market / overround" v={`${pct(c.p_market_novig)} / ${pct(c.overround)}`} />
+              <KV k={`Market reference (${c.market_basis ?? "n/a"})`} v={pct(c.p_market_novig)} />
+              <KV k="This book's own no-vig / overround" v={`${pct(c.p_book_novig)} / ${pct(c.overround)}`} />
+              <KV k="Raw model before recalibration (sd)" v={`${pct(c.p_model_raw)} (±${pct(c.p_sd_model)})`} />
               <KV k="Estimated fair odds" v={am(c.fair_american)} />
               <KV k="EV per 1 unit (point / conservative)" v={`${signed(c.ev)} / ${signed(c.ev_conservative)}`} tone={(c.ev_conservative ?? 0) > 0 ? "good" : "bad"} />
               <KV k="Max loss per 1 unit staked" v="-1.00" tone="bad" />

@@ -123,3 +123,38 @@ def test_pick_top_one_per_game_and_player():
              [("a", "g1", 0.1), ("a", "g1", 0.09), ("b", "g1", 0.08), ("c", "g2", 0.05), ("d", "g3", 0.01), ("e", "g4", 0.0)]]
     top = pick_top(cands, 3)
     assert [c["athlete_id"] for c in top] == ["a", "c", "d"]
+
+
+def test_consensus_reference_finds_off_market_book(hist):
+    """With the model at 0% weight, a book paying -110 when the other books' fair price is 56% is +EV;
+    the same quote judged only against its own two-way price is not."""
+    pj = project(hist, "p1", "pts", day_after(hist, 30), 2027, ctx())
+    gate = Gate(False, 0.0, 0.0, "", (0.0, 1.0))
+    own = evaluate_quote(pj, 23.5, "over", -110, -110, gate, [])
+    cons = evaluate_quote(pj, 23.5, "over", -110, -110, gate, [], consensus_over=[0.55, 0.57])
+    assert own["ev"] < 0 and own["market_basis"] == "own two-way no-vig"
+    assert cons["p_final"] == pytest.approx(0.56) and cons["ev"] > 0
+    assert cons["market_basis"].startswith("consensus of 2")
+    assert cons["p_sd"] == pytest.approx(0.0, abs=1e-9)  # the model carries no weight, so no model uncertainty
+    # model-only checks become informational when the model has no weight
+    assert all(f["severity"] != "exclude" for f in cons["flags"] if f["code"] in ("model_disagreement", "outlier_dependence"))
+
+
+def test_stress_moves_final_probability_by_model_sensitivity(hist):
+    from app.risk.engine import stress_test
+    d = day_after(hist, 30)
+    pj = project(hist, "p1", "pts", d, 2027, ctx())
+    base = evaluate_quote(pj, 23.5, "over", -110, -110, Gate(False, 0.0, 0.0, "", (0.0, 1.0)), [], consensus_over=[0.5, 0.5])
+    st = stress_test(lambda ov: project(hist, "p1", "pts", d, 2027, ctx(), overrides=ov, B=60, S=150), base)
+    by = {o["code"]: o for o in st["scenarios"]}
+    assert by["minutes_down_10"]["delta"] < 0          # fewer minutes lowers the over even at 0% model weight
+    assert by["line_moves_against"]["delta"] < 0
+
+
+def test_conservative_uses_least_favorable_book_and_single_book_is_thin(hist):
+    pj = project(hist, "p1", "pts", day_after(hist, 30), 2027, ctx())
+    gate = Gate(False, 0.0, 0.0, "", (0.0, 1.0))
+    ev = evaluate_quote(pj, 23.5, "over", -110, -110, gate, [], consensus_over=[0.53, 0.59])
+    assert ev["p_final"] == pytest.approx(0.56) and ev["p_conservative"] == pytest.approx(0.53)
+    thin = evaluate_quote(pj, 23.5, "over", -110, -110, gate, [], consensus_over=[0.6])
+    assert any(f["code"] == "thin_consensus" and f["severity"] == "exclude" for f in thin["flags"])

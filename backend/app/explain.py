@@ -31,7 +31,12 @@ def deterministic(c: dict) -> dict:
               f"on {c['minutes_proj']} projected minutes, giving a {_pct(c['p_final'])} estimate "
               f"(conservative {_pct(c['p_conservative'])}) against a {_pct(c['break_even'])} break-even at {c['american']:+d}.")
     if c.get("p_market_novig") is not None:
-        thesis += f" The no-vig market probability is {_pct(c['p_market_novig'])}, so the estimated edge is {_pct(c.get('edge_vs_market'))}."
+        thesis += (f" The market reference ({c.get('market_basis', 'no-vig')}) is {_pct(c['p_market_novig'])}; "
+                   f"the edge over break-even is {_pct(c.get('edge_vs_market'))}.")
+    if c.get("status") == "watchlist":
+        why = " ".join(c.get("watchlist_reasons") or []) or f"Expected value at {c['american']:+d} is {c['ev']:+.3f} per unit."
+        thesis = ("WATCHLIST, NOT A PICK: this prop passed every data, availability, stability and stress check, "
+                  f"but not the market checks. {why} ") + thesis
     support, against, invalidate = [], [], []
     if l20:
         support.append(f"Historical: {l20['hits']}/{l20['n']} of the last {l20['n']} games went over {line} "
