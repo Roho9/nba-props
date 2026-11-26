@@ -28,6 +28,10 @@ log = logging.getLogger("pipeline")
 SLATE_PATH = BACKEND_DIR / "data" / "latest_slate.json"
 # A prop may fill an empty Top 3 slot as a labeled watchlist entry if its only failures are on price.
 WATCHLIST_ALLOWED = {"negative_ev", "negative_conservative_ev", "thin_consensus"}
+# The high-probability view also admits alternate lines (that is where 60-75% props live); their
+# probability then comes from the main line anchored through the model distribution.
+HIGH_PROB_ALLOWED = WATCHLIST_ALLOWED | {"alt_line_unvalidated"}
+STRESS_CODES = {"overtime_reliance", "script_dependence", "teammate_assumption", "fragile"}
 _lock = threading.Lock()
 state = {"running": False, "last_error": None, "last_started": None}
 
@@ -184,7 +188,7 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
     quotes = latest_quotes([g.game_id for g in pre_games]) if pre_games else pd.DataFrame()
     gmap = {g.game_id: g for g in games}
     day = int(to_day([slate])[0])
-    rows, candidates, watch, coverage = [], [], [], defaultdict(lambda: {"main_props": 0, "alt_props": 0, "players": set()})
+    rows, candidates, watch, band_pool, coverage = [], [], [], [], defaultdict(lambda: {"main_props": 0, "alt_props": 0, "players": set()})
     proj_cache = {}
     if not quotes.empty:
         quotes = quotes.copy()
@@ -293,11 +297,18 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
                         candidates.append(item)
                     elif {f["code"] for f in excl} <= WATCHLIST_ALLOWED:
                         watch.append(item)  # passes every data, availability and stability check; fails only on price
+                    if ({f["code"] for f in excl} <= HIGH_PROB_ALLOWED and ev["p_market_novig"] is not None
+                            and s.target_p_min <= ev["p_final"] <= s.target_p_max):
+                        band_pool.append(item)
 
     # Stress-test the best candidates and watchlist props (most expensive step, so only here)
-    def run_stress(items):
+    def run_stress(items, key=lambda c: c["eval"]["ev_conservative"]):
         kept = []
-        for c in sorted(items, key=lambda c: c["eval"]["ev_conservative"], reverse=True)[:40]:
+        for c in sorted(items, key=key, reverse=True)[:40]:
+            if "stress" in c["row"]:  # already tested through another list
+                if not any(f["severity"] == "exclude" and f["code"] in STRESS_CODES for f in c["row"]["reasons"]):
+                    kept.append(c)
+                continue
             proj, ctx, g = proj_cache[c["key"]]
             st = stress_test(lambda ov: project(h, c["athlete_id"], c["row"]["market"], day, g.season, ctx, overrides=ov,
                                                 B=80, S=200), {**c["eval"]})
@@ -309,6 +320,21 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
                 continue
             kept.append(c)
         return kept
+
+    def build_payload(c, rank, group):
+        r = c["row"]
+        proj, ctx, g = proj_cache[c["key"]]
+        r["rank"] = rank
+        r["history"] = _history_payload(h, c["athlete_id"], r["market"], day, r["line"], ctx.opp_team_id, teams)
+        r["distribution"] = proj.summary_dist(get_settings().mc_seed)
+        r["diagnostics"] = _jsonable(proj.diagnostics)
+        r["context"] = _context_payload(h, g, ctx, teams, injuries, day)
+        r["market_compare"] = [_slim(x) for x in rows if x["athlete_id"] == c["athlete_id"] and x["market"] == r["market"]
+                               and x["game_id"] == c["game_id"]]
+        r["shared_risk"] = [o["row"]["athlete_name"] for o in group if o is not c and o["game_id"] == c["game_id"]]
+        r["sources"] = _sources(r, injuries.get(c["athlete_id"]))
+        r["injury_signature"] = _injury_signature(injuries, {ctx.team_id, ctx.opp_team_id})
+        return r
 
     survivors = run_stress(candidates)
     watch_survivors = run_stress(watch)
@@ -331,25 +357,34 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
         top.append(c)
         used_players.add(c["athlete_id"])
         used_games.add(c["game_id"])
-    published = []
-    for rank, c in enumerate(top, 1):
-        r = c["row"]
-        proj, ctx, g = proj_cache[c["key"]]
+    published = [build_payload(c, rank, top) for rank, c in enumerate(top, 1)]
+
+    # High-probability view: best price (highest EV) among props in the target probability band that
+    # pass every non-price check and the stress tests. Copies, so the main list keeps its own labels.
+    band_kept = run_stress(band_pool, key=lambda c: c["eval"]["ev"])
+    band_top, bp, bg = [], set(), set()
+    for c in sorted(band_kept, key=lambda c: c["eval"]["ev"], reverse=True):
+        if c["athlete_id"] in bp or c["game_id"] in bg:
+            continue
+        band_top.append(c)
+        bp.add(c["athlete_id"])
+        bg.add(c["game_id"])
+        if len(band_top) == 3:
+            break
+    high_probability = []
+    band_top = [{**c, "row": dict(c["row"])} for c in band_top]  # never mutate rows shared with the main list
+    for rank, c in enumerate(band_top, 1):
+        r = build_payload(c, rank, band_top)
         r["rank"] = rank
-        r["history"] = _history_payload(h, c["athlete_id"], r["market"], day, r["line"], ctx.opp_team_id, teams)
-        r["distribution"] = proj.summary_dist(get_settings().mc_seed)
-        r["diagnostics"] = _jsonable(proj.diagnostics)
-        r["context"] = _context_payload(h, g, ctx, teams, injuries, day)
-        r["market_compare"] = [_slim(x) for x in rows if x["athlete_id"] == c["athlete_id"] and x["market"] == r["market"]
-                               and x["game_id"] == c["game_id"]]
-        r["shared_risk"] = [o["row"]["athlete_name"] for o in top if o is not c and o["game_id"] == c["game_id"]]
-        r["sources"] = _sources(r, injuries.get(c["athlete_id"]))
-        r["injury_signature"] = _injury_signature(injuries, {ctx.team_id, ctx.opp_team_id})
-        published.append(r)
+        r["status"] = "high_probability"
+        non_price = [f for f in r["reasons"] if f["code"] not in HIGH_PROB_ALLOWED]
+        r["risk"] = risk_class(non_price, c["eval"]["p_sd"], proj_cache[c["key"]][0].diagnostics.get("minutes_cv", 1))
+        r["watchlist_reasons"] = [f["text"] for f in r["reasons"] if f["code"] in HIGH_PROB_ALLOWED]
+        high_probability.append(r)
     for r in rows:
         if r["status"] == "candidate":
             r["status"] = "passed_filters_not_ranked"
-    _publish(slate, run_id, published)
+    _publish(slate, run_id, published + high_probability)
 
     n_quotes = len(rows)
     rej = defaultdict(int)
@@ -404,7 +439,10 @@ def _evaluate(slate: str, run_id: int, refresh_report: dict) -> dict:
         "recent_fetch_failures": [{"source": f.source, "status": f.status, "url": f.url[:120], "at": f.at} for f in fails[-10:]],
         "paper_mode": True, "model_version": MODEL_VERSION,
     }
-    return {"overview": overview, "candidates": published, "slate": [_slim(r) for r in rows]}
+    overview["high_probability_band"] = [s.target_p_min, s.target_p_max]
+    overview["n_high_probability_eligible"] = len(band_kept)
+    return {"overview": overview, "candidates": published, "high_probability": high_probability,
+            "slate": [_slim(r) for r in rows]}
 
 
 def _slim(r: dict) -> dict:
@@ -528,7 +566,7 @@ def invalidate(slate: str, result: dict):
                 reasons.append("Quote no longer offered at this line.")
             elif q["line"] != p.line:
                 reasons.append(f"Line moved from {p.line} to {q['line']}.")
-            elif p.status != "watchlist" and q.get("ev_conservative") is not None and q["ev_conservative"] <= 0:
+            elif p.status not in ("watchlist", "high_probability") and q.get("ev_conservative") is not None and q["ev_conservative"] <= 0:
                 reasons.append(f"Conservative EV is now {q['ev_conservative']:+.3f} at {q['american']:+d}.")
             if reasons:
                 p.invalidated_at = utcnow()
@@ -608,7 +646,7 @@ def tracker_summary() -> dict:
         w = res[max(0, i - 19): i + 1]
         roll.append({"n": i + 1, "rolling_hit_rate_20": round(float(np.mean(w)), 3)})
     by_status = {}
-    for st_name in ("qualified", "research_only", "watchlist"):
+    for st_name in ("qualified", "research_only", "watchlist", "high_probability"):
         sub = [r for r in rows if r["status"] == st_name and r["result"] in ("win", "loss", "push", "void")]
         wl = [r for r in sub if r["result"] in ("win", "loss")]
         by_status[st_name] = {"settled": len(wl), "wins": sum(1 for r in wl if r["result"] == "win"),

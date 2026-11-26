@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, ShieldAlert, TriangleAlert } from "lucide-react";
 import { useSlate } from "@/components/use-slate";
 import { Badge, Card, Empty, KV, Stat, riskTone } from "@/components/ui";
@@ -7,11 +7,24 @@ import { DistributionChart, GameBars, MinutesChart, UsageChart } from "@/compone
 import { am, ago, dateTime, minutesSince, num, pct, signed, time } from "@/lib/fmt";
 import type { Candidate, Overview } from "@/lib/types";
 
+type Mode = "value" | "high";
+
 export default function Today() {
   const { data, error } = useSlate();
+  const [mode, setModeState] = useState<Mode>("value");
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get("view");
+    if (fromUrl === "high" || fromUrl === "value") { setModeState(fromUrl); return; }
+    try { if (localStorage.getItem("top3-mode") === "high") setModeState("high"); } catch { /* storage unavailable */ }
+  }, []);
+  const setMode = (m: Mode) => {
+    setModeState(m);
+    try { localStorage.setItem("top3-mode", m); } catch { /* storage unavailable */ }
+  };
   if (error) return <Empty>Backend unreachable: {error}. Start it with <code>make backend</code>.</Empty>;
   if (!data) return <Empty>Loading…</Empty>;
   const o = data.overview;
+  const shown = mode === "high" ? (data.high_probability ?? []) : data.candidates;
   return (
     <div className="space-y-5">
       {data.pipeline?.running && <Badge tone="warn">Refresh running: pulling odds, injuries and re-running the model…</Badge>}
@@ -24,11 +37,20 @@ export default function Today() {
             </div>
           )}
           <OverviewPanel o={o} />
-          <TopThree o={o} cands={data.candidates} />
-          {data.candidates.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[12px] text-faint">Top 3 view:</span>
+            {([["value", "Best value"], ["high", `High probability (${Math.round((o.high_probability_band?.[0] ?? 0.6) * 100)}-${Math.round((o.high_probability_band?.[1] ?? 0.75) * 100)}%)`]] as const).map(([m, label]) => (
+              <button key={m} onClick={() => setMode(m)}
+                className={`rounded border px-2.5 py-1 text-[12.5px] ${mode === m ? "border-mute bg-panel-2 text-ink" : "border-line-2 text-mute hover:text-ink"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {mode === "high" ? <HighProbThree o={o} cands={shown} /> : <TopThree o={o} cands={shown} />}
+          {shown.length > 0 && (
             <div className="space-y-3">
               <h2 className="text-[13px] font-medium tracking-wide text-mute">DETAILED RESEARCH BREAKDOWN</h2>
-              {data.candidates.map((c) => <Breakdown key={`${c.athlete_id}-${c.market}-${c.side}`} c={c} />)}
+              {shown.map((c) => <Breakdown key={`${mode}-${c.athlete_id}-${c.market}-${c.side}-${c.line}`} c={c} />)}
             </div>
           )}
         </>
@@ -87,6 +109,7 @@ function OverviewPanel({ o }: { o: Overview }) {
 
 function statusBadge(status: string): { tone: "good" | "warn" | "mute"; label: string } {
   if (status === "qualified") return { tone: "good", label: "QUALIFIED" };
+  if (status === "high_probability") return { tone: "mute", label: "HIGH PROBABILITY · NOT A PICK" };
   if (status === "research_only") return { tone: "warn", label: "RESEARCH ONLY · +EV, UNVALIDATED" };
   return { tone: "mute", label: "WATCHLIST · NOT A PICK" };
 }
@@ -121,6 +144,37 @@ function TopThree({ o, cands }: { o: Overview; cands: Candidate[] }) {
   );
 }
 
+function riskToWin(american: number) {
+  // stake needed to win $100, and winnings on a $100 stake
+  return american < 0 ? { risk: -american, win: 100 } : { risk: 100, win: american };
+}
+
+function HighProbThree({ o, cands }: { o: Overview; cands: Candidate[] }) {
+  const band = o.high_probability_band ?? [0.6, 0.75];
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-line-2 bg-panel px-5 py-4 text-[12.5px] leading-relaxed text-mute">
+        <div className="text-[14px] font-semibold text-ink">Highest-probability props that pass every safety check</div>
+        <p className="mt-1">Probability between {Math.round(band[0] * 100)}% and {Math.round(band[1] * 100)}%, from the market (other books&apos; consensus, or the main line for alternate lines), ranked by the best price for that probability. Every availability, minutes, role, stability and stress filter still applies.</p>
+        <p className="mt-1"><b className="text-warn">None of these is risk-free.</b> They lose about 1 time in 3 or 4, and the price is set so that each loss costs more than each win pays. Without an edge, the expected result is still a small loss per bet; it is shown on every card.</p>
+        <p className="mt-1">{o.headline ?? ""}</p>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-3">
+        {[0, 1, 2].map((i) => {
+          const c = cands[i];
+          if (!c) return (
+            <div key={i} className="flex min-h-[220px] items-center justify-center rounded-lg border border-dashed border-line-2 p-4 text-center text-[12.5px] text-mute">
+              Slot {i + 1} empty: no{i > 0 ? " further" : ""} prop in the {Math.round(band[0] * 100)}-{Math.round(band[1] * 100)}% range passed every safety check
+              {o.n_high_probability_eligible != null && ` (${o.n_high_probability_eligible} eligible today)`}.
+            </div>
+          );
+          return <CandidateCard key={i} c={c} />;
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CandidateCard({ c }: { c: Candidate }) {
   const l20 = c.history?.windows?.L20;
   const evLoss = -1;
@@ -140,6 +194,17 @@ function CandidateCard({ c }: { c: Candidate }) {
           <Badge tone={riskTone(c.risk)}>{c.risk} risk</Badge>
         </div>
       </div>
+      {c.status === "high_probability" && (() => {
+        const rw = riskToWin(c.american);
+        const winsIn10 = Math.round((c.p_final ?? 0) * 10);
+        return (
+          <div className="mt-2 grid grid-cols-3 gap-2 rounded border border-line-2 bg-panel-2 px-2.5 py-2 text-[11.5px]">
+            <div><div className="text-faint">Wins about</div><div className="num text-ink">{winsIn10} in 10</div></div>
+            <div><div className="text-faint">Risk to win</div><div className="num text-ink">${rw.risk} → ${rw.win}</div></div>
+            <div><div className="text-faint">Expected per $100</div><div className={`num ${(c.ev ?? 0) >= 0 ? "text-up" : "text-down"}`}>{(c.ev ?? 0) >= 0 ? "+" : "-"}${Math.abs((c.ev ?? 0) * 100).toFixed(2)}</div></div>
+          </div>
+        );
+      })()}
       {c.status === "watchlist" && (c.watchlist_reasons?.length ?? 0) > 0 && (
         <div className="mt-2 rounded border border-line-2 bg-panel-2 px-2.5 py-1.5 text-[11.5px] leading-snug text-mute">
           Not a pick: {c.watchlist_reasons!.join(" ")}
@@ -177,7 +242,7 @@ function Breakdown({ c }: { c: Candidate }) {
   const h = c.history;
   const d = c.diagnostics as Record<string, number | number[] | string | object[] | null>;
   const ctx = c.context;
-  const ex = c.explanation;
+  const ex = c.explanation ?? { thesis: "", supporting: [], contradicting: [], uncertainties: [], invalidators: [], generator: "unavailable" };
   const windows = ["L5", "L10", "L15", "L20", "L30"].filter((k) => h.windows[k]);
   return (
     <Card title={

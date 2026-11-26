@@ -49,7 +49,7 @@ def slate():
     data["is_today"] = data.get("overview", {}).get("slate_date") == today
     data["today"] = today
     data["pipeline"] = pipeline.state
-    for c in data.get("candidates", []):
+    for c in data.get("candidates", []) + data.get("high_probability", []):
         c["explanation"] = c.get("explanation") or explain(c)
     return _dump(data)
 

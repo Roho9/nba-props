@@ -60,7 +60,7 @@ export default function TrackerPage() {
                   <td className="py-1">{r.date}</td><td className="font-sans">{r.player} <span className="text-faint">{r.team} v {r.opp}</span></td>
                   <td className="font-sans">{r.side} {r.market}</td><td>{r.line}</td><td>{am(r.american)}</td><td className="font-sans">{r.book}</td>
                   <td>{pct(r.p_model)}</td><td>{pct(r.p_conservative)}</td>
-                  <td className="font-sans">{r.status === "qualified" ? <Badge tone="good">qualified</Badge> : r.status === "watchlist" ? <Badge>watchlist</Badge> : <Badge tone="warn">research only</Badge>}
+                  <td className="font-sans">{r.status === "qualified" ? <Badge tone="good">qualified</Badge> : r.status === "watchlist" ? <Badge>watchlist</Badge> : r.status === "high_probability" ? <Badge>high probability</Badge> : <Badge tone="warn">research only</Badge>}
                     {r.invalidated_at && <span title={r.invalidation_reason ?? ""}><Badge tone="bad">invalidated</Badge></span>}</td>
                   <td className="text-faint">{r.model_version}</td><td className="text-mute">{dateTime(r.created_at)}</td>
                   <td>{r.closing_line != null ? `${r.closing_line} @ ${am(r.closing_american)}` : "n/a"}</td>

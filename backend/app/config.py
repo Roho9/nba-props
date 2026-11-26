@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     min_conservative_edge: float = 0.0
     paper_stake_units: float = 1.0
 
+    # High-probability view: props whose market-based probability falls in this band
+    target_p_min: float = 0.60
+    target_p_max: float = 0.75
+
     @property
     def season_list(self) -> list[int]:
         return [int(s) for s in self.seasons.split(",") if s.strip()]

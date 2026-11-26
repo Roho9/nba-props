@@ -33,6 +33,12 @@ def deterministic(c: dict) -> dict:
     if c.get("p_market_novig") is not None:
         thesis += (f" The market reference ({c.get('market_basis', 'no-vig')}) is {_pct(c['p_market_novig'])}; "
                    f"the edge over break-even is {_pct(c.get('edge_vs_market'))}.")
+    if c.get("status") == "high_probability":
+        dec = (c["american"] / 100 + 1) if c["american"] > 0 else (100 / -c["american"] + 1)
+        risk = 100 if c["american"] > 0 else -c["american"]
+        thesis = (f"HIGH-PROBABILITY VIEW, NOT A PICK: the market-based estimate is {_pct(c['p_final'])} (wins about "
+                  f"{round(c['p_final'] * 10)} in 10), but at {c['american']:+d} you risk ${risk} to win ${round((dec - 1) * risk)} "
+                  f"and the price needs {_pct(c['break_even'])} to break even. Expected result: {c['ev'] * 100:+.1f} per $100 staked. ") + thesis
     if c.get("status") == "watchlist":
         why = " ".join(c.get("watchlist_reasons") or []) or f"Expected value at {c['american']:+d} is {c['ev']:+.3f} per unit."
         thesis = ("WATCHLIST, NOT A PICK: this prop passed every data, availability, stability and stress check, "

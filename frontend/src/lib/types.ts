@@ -46,7 +46,8 @@ export interface Candidate extends SlateRow {
 
 export interface Overview {
   slate_date: string; timezone: string; generated_at: string; run_id: number; n_games: number; n_games_evaluated: number;
-  n_players: number; n_props: number; n_offers: number; n_qualifying: number; n_passed_filters: number; n_watchlist_eligible?: number; n_watchlist_shown?: number; books: string[];
+  n_players: number; n_props: number; n_offers: number; n_qualifying: number; n_passed_filters: number; n_watchlist_eligible?: number; n_watchlist_shown?: number;
+  high_probability_band?: [number, number]; n_high_probability_eligible?: number; books: string[];
   odds_freshest: string | null; odds_oldest: string | null; injury_report_at: string | null; injury_source: string;
   last_successful_run: string | null;
   validation: { validated: boolean; reason: string; blend_weight: number; min_edge: number; report_generated_at: string | null };
@@ -57,6 +58,6 @@ export interface Overview {
 }
 
 export interface SlateResponse {
-  overview: Overview | null; candidates: Candidate[]; slate: SlateRow[]; is_today?: boolean; today?: string;
+  overview: Overview | null; candidates: Candidate[]; high_probability?: Candidate[]; slate: SlateRow[]; is_today?: boolean; today?: string;
   pipeline: { running: boolean; last_error: string | null; last_started: string | null }; message?: string;
 }
